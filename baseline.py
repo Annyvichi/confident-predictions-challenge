@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
-import os
+import sys
 import joblib
+
 
 def softmax(x):
     # Compute the exponential values for each element in the input array
@@ -11,14 +12,45 @@ def softmax(x):
     return exps / np.sum(exps)
 
 
-# Load the data from a Parquet file into a pandas DataFrame.
+# Load the data from a Parquet file into a pandas DataFrame, approximate distances for every pair of labels into 'dist' and approximate labels' coordinates into 'coord'.
 data_frame = pd.read_parquet(sys.argv[1])
+dist = np.load('distances.npy')       #Unknown distances are defined as 30000
+coord = np.load('coordinates.npy')
 
-# Initialize an empty list to store the maximum confidence values.
+# Initialize an empty list to store the maximum confidence values and an empty array for the model's input data.
 max_confidences = []
+X = np.ones((len(data), 3015), float)
 
+data_frame['predicted_dist'] = data_frame['distance']
+i = 0
 # Iterate over the DataFrame rows.
 for _, row in data_frame.iterrows():
+    
+    pred = np.argmax(row['raw_prediction'])
+    X_sorted_labels = np.argsort(row['raw_prediction'])
+    X_distances = []
+    for j in range(3000):
+        if dist[pred][X_sorted_labels[j]] != 30000:
+            X_distances.append(dist[pred][X_sorted_labels[j]])
+            
+    # Mark the items where distances between 'pred' and the rest of the labels are not defined            
+    if len(X_distances)==0:
+        X[i][0] = 30000
+        data_frame.iat[i, 6] = 30000    #the 6th column is 'predicted_dist'
+        
+    else:
+        X_dist_len10 = X_distances[2008:]
+        X_dist_len10.sort()
+        X[i][:9] = X_dist_len10[1:]
+        
+    X[i][9] = coord[pred][0]
+    X[i][10] = coord[pred][1]
+    X[i][11] = row['confidence']
+    X[i][12] = row['text'].count('https://')
+    X[i][13] = row['text'].count(' ')
+    X[i][14] = len(row['text'])
+    X[i][15:3015] = row['raw_prediction']
+    i +=1
     
     # Compute softmax for the 'raw_prediction' column of the current row.
     softmax_values = softmax(row['raw_prediction'])
@@ -26,19 +58,22 @@ for _, row in data_frame.iterrows():
     # Find the maximum confidence value and append it to the list.
     max_confidences.append(softmax_values.max())
 
-    # Sort raw_prediction in ascending order.
-    row['raw_prediction'] = np.sort(row['raw_prediction'])
-
-X = np.array([[data_frame['raw_prediction'].values[i]] for i in range(data_frame.shape[0])]).squeeze()
-model = joblib.load('model.pkl')
-
 # Add a new column 'confidence' to the DataFrame using the list of maximum confidence values.
 data_frame['confidence'] = max_confidences
 data_frame['pred'] = [x.argmax() for x in data_frame['raw_prediction']]
-data_frame['top_pred'] = model.predict(X)
+
+# Sort out the marked items
+X = X[X[:, 0] != 30000]
+data = data_frame.loc[data_frame['predicted_dist']<30000]
+data_ = data_frame.loc[data_frame['predicted_dist']==30000]
+
+model = joblib.load('model.pkl')
+data['predicted_dist'] = model.predict(X)
+
+data_frame = pd.concat([data, data_], sort=False, axis=0)
 
 # Sort the DataFrame.
-sorted_data_frame = data_frame.loc[data_frame['top_pred']==1]
+sorted_data_frame = data_frame.sort_values(by='predicted_dist', ascending=True)
 
 # Determine the number of top records to consider for computing mean distance.
 top_records_count = int(0.1 * len(data_frame))
